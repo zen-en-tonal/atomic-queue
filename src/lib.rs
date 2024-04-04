@@ -1,23 +1,23 @@
 #![cfg_attr(not(test), no_std)]
 
-use core::{
-    cell::RefCell,
-    mem,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+extern crate atomic;
+
+use atomic::{Atomic, Ordering};
+use core::{cell::RefCell, mem};
 
 /// AtomicQueue consists of the following two atomic operations;
 /// - index update for read/write
 /// - element replacement
 #[derive(Debug)]
 pub struct AtomicQueue<T, const N: usize> {
-    read: AtomicUsize,
-    write: AtomicUsize,
+    read: Atomic<usize>,
+    write: Atomic<usize>,
     buffer: [RefCell<mem::MaybeUninit<T>>; N],
-    flags: [AtomicBool; N],
+    flags: [Atomic<bool>; N],
 }
 
-const ATOMIC_BOOL_FALSE: AtomicBool = AtomicBool::new(false);
+const ATOMIC_BOOL_FALSE: Atomic<bool> = Atomic::new(false);
+const ATOMIC_USIZE_ZERO: Atomic<usize> = Atomic::new(0usize);
 
 impl<T, const N: usize> AtomicQueue<T, N> {
     /// Creates a new instance.
@@ -36,8 +36,8 @@ impl<T, const N: usize> AtomicQueue<T, N> {
             panic!("N must be larger than 1")
         }
         AtomicQueue {
-            read: AtomicUsize::new(0),
-            write: AtomicUsize::new(0),
+            read: ATOMIC_USIZE_ZERO,
+            write: ATOMIC_USIZE_ZERO,
             buffer: unsafe { mem::zeroed() },
             flags: [ATOMIC_BOOL_FALSE; N],
         }
