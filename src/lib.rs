@@ -3,7 +3,8 @@
 extern crate atomic;
 
 use atomic::{Atomic, Ordering};
-use core::{cell::RefCell, mem};
+use core::cell::UnsafeCell;
+use core::mem;
 
 /// AtomicQueue consists of the following two atomic operations;
 /// - index update for read/write
@@ -12,8 +13,9 @@ use core::{cell::RefCell, mem};
 pub struct AtomicQueue<T, const N: usize> {
     read: Atomic<usize>,
     write: Atomic<usize>,
-    buffer: [RefCell<mem::MaybeUninit<T>>; N],
-    flags: [Atomic<bool>; N],
+    buffer: [UnsafeCell<mem::MaybeUninit<T>>; N],
+    /// the flags to store where the entry is locked.
+    where_to_lock: [Atomic<bool>; N],
 }
 
 const ATOMIC_BOOL_FALSE: Atomic<bool> = Atomic::new(false);
@@ -39,7 +41,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
             read: ATOMIC_USIZE_ZERO,
             write: ATOMIC_USIZE_ZERO,
             buffer: unsafe { mem::zeroed() },
-            flags: [ATOMIC_BOOL_FALSE; N],
+            where_to_lock: [ATOMIC_BOOL_FALSE; N],
         }
     }
 
@@ -66,14 +68,14 @@ impl<T, const N: usize> AtomicQueue<T, N> {
             ) {
                 Ok(write) => {
                     // Wait for if the entry is already locked to read.
-                    while self.flags[write]
+                    while self.where_to_lock[write]
                         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                         .is_err()
                     {}
 
                     let _ = mem::replace(
                         // Safety: the entry at the `write` index is occupied by the above operation.
-                        &mut *self.buffer[write].borrow_mut(),
+                        unsafe { &mut *self.buffer[write].get() },
                         mem::MaybeUninit::new(entry),
                     );
 
@@ -81,7 +83,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                     // All above operations should be executed
                     // before other thread acquire the lock.
                     // Because the lock to write is unlocked by Ordering::Release.
-                    self.flags[write].store(false, Ordering::Release);
+                    self.where_to_lock[write].store(false, Ordering::Release);
 
                     break true;
                 }
@@ -115,14 +117,14 @@ impl<T, const N: usize> AtomicQueue<T, N> {
             ) {
                 Ok(read) => {
                     // Wait for if the entry is already locked to write.
-                    while self.flags[read]
+                    while self.where_to_lock[read]
                         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                         .is_err()
                     {}
 
                     let value = mem::replace(
                         // Safety: the entry at the `read` index is occupied by the above operation.
-                        &mut *self.buffer[read].borrow_mut(),
+                        unsafe { &mut *self.buffer[read].get() },
                         mem::MaybeUninit::uninit(),
                     );
                     // Safety: the value must be meaningful by the above operation.
@@ -132,7 +134,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                     // All above operations should be executed
                     // before other thread acquire the lock.
                     // Because the lock to read is unlocked by Ordering::Release.
-                    self.flags[read].store(false, Ordering::Release);
+                    self.where_to_lock[read].store(false, Ordering::Release);
 
                     return Some(value);
                 }
