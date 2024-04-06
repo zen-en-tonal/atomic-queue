@@ -56,32 +56,35 @@ impl<T, const N: usize> AtomicQueue<T, N> {
         if self.is_full() {
             return false;
         }
-        match self
-            .write
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % N))
-        {
-            Ok(write) => {
-                // If the entry is already locked, start over from the beginning.
-                if self.flags[write]
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-                {
-                    return self.enqueue(entry);
+        let mut current = self.write.load(Ordering::Relaxed);
+        loop {
+            match self.write.compare_exchange_weak(
+                current,
+                (current + 1) % N,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(write) => {
+                    // Wait for if the entry is already locked to read.
+                    while self.flags[write]
+                        .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_err()
+                    {}
+
+                    let _ = mem::replace(
+                        // Safety: the entry at the `write` index is occupied by the above operation.
+                        &mut *self.buffer[write].borrow_mut(),
+                        mem::MaybeUninit::new(entry),
+                    );
+
+                    // release lock.
+                    self.flags[write].store(false, Ordering::Relaxed);
+
+                    break true;
                 }
-
-                let _ = mem::replace(
-                    // Safety: the entry at the `write` index is occupied by the above operation.
-                    &mut *self.buffer[write].borrow_mut(),
-                    mem::MaybeUninit::new(entry),
-                );
-
-                // release lock.
-                self.flags[write].store(false, Ordering::SeqCst);
-
-                true
+                // If the index is changing, retry over with that value.
+                Err(v) => current = v,
             }
-            // If the write index is changing, start over from the beginning.
-            Err(_) => self.enqueue(entry),
         }
     }
 
@@ -99,43 +102,46 @@ impl<T, const N: usize> AtomicQueue<T, N> {
         if self.is_empty() {
             return None;
         }
-        match self
-            .read
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % N))
-        {
-            Ok(read) => {
-                // If the entry is already locked, start over from the beginning.
-                if self.flags[read]
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-                {
-                    return self.dequeue();
+        let mut current = self.read.load(Ordering::Relaxed);
+        loop {
+            match self.read.compare_exchange_weak(
+                current,
+                (current + 1) % N,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(read) => {
+                    // Wait for if the entry is already locked to write.
+                    while self.flags[read]
+                        .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_err()
+                    {}
+
+                    let value = mem::replace(
+                        // Safety: the entry at the `read` index is occupied by the above operation.
+                        &mut *self.buffer[read].borrow_mut(),
+                        mem::MaybeUninit::uninit(),
+                    );
+                    // Safety: the value must be meaningful by the above operation.
+                    let value = unsafe { value.assume_init() };
+
+                    // release lock.
+                    self.flags[read].store(false, Ordering::Relaxed);
+
+                    return Some(value);
                 }
-
-                let value = mem::replace(
-                    // Safety: the entry at the `read` index is occupied by the above operation.
-                    &mut *self.buffer[read].borrow_mut(),
-                    mem::MaybeUninit::uninit(),
-                );
-                // Safety: the value must be meaningful by the above operation.
-                let value = unsafe { value.assume_init() };
-
-                // release lock.
-                self.flags[read].store(false, Ordering::SeqCst);
-
-                Some(value)
+                // If the index is changing, retry over with that value.
+                Err(v) => current = v,
             }
-            // If the read index is changing, start over from the beginning.
-            Err(_) => self.dequeue(),
         }
     }
 
     pub fn is_full(&self) -> bool {
-        self.read.load(Ordering::SeqCst) == ((self.write.load(Ordering::SeqCst) + 1) % N)
+        self.read.load(Ordering::Relaxed) == ((self.write.load(Ordering::Relaxed) + 1) % N)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read.load(Ordering::SeqCst) == self.write.load(Ordering::SeqCst)
+        self.read.load(Ordering::Relaxed) == self.write.load(Ordering::Relaxed)
     }
 
     pub const fn capacity(&self) -> usize {
