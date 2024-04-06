@@ -16,6 +16,7 @@ pub struct AtomicQueue<T, const N: usize> {
     buffer: [UnsafeCell<mem::MaybeUninit<T>>; N],
     /// the flags to store where the entry is locked.
     where_to_lock: [Atomic<bool>; N],
+    is_destroying: Atomic<bool>,
 }
 
 const ATOMIC_BOOL_FALSE: Atomic<bool> = Atomic::new(false);
@@ -42,6 +43,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
             write: ATOMIC_USIZE_ZERO,
             buffer: unsafe { mem::zeroed() },
             where_to_lock: [ATOMIC_BOOL_FALSE; N],
+            is_destroying: ATOMIC_BOOL_FALSE,
         }
     }
 
@@ -85,7 +87,11 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                     // Because the lock to write is unlocked by Ordering::Release.
                     self.where_to_lock[write].store(false, Ordering::Release);
 
-                    break true;
+                    if self.is_destroying.load(Ordering::Acquire) {
+                        return false;
+                    } else {
+                        return true;
+                    }
                 }
                 // If the index is changing, retry over with that value.
                 Err(v) => current = v,
@@ -136,7 +142,11 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                     // Because the lock to read is unlocked by Ordering::Release.
                     self.where_to_lock[read].store(false, Ordering::Release);
 
-                    return Some(value);
+                    if self.is_destroying.load(Ordering::Acquire) {
+                        return None;
+                    } else {
+                        return Some(value);
+                    }
                 }
                 // If the index is changing, retry over with that value.
                 Err(v) => current = v,
@@ -154,6 +164,13 @@ impl<T, const N: usize> AtomicQueue<T, N> {
 
     pub const fn capacity(&self) -> usize {
         N - 1
+    }
+}
+
+impl<T, const N: usize> Drop for AtomicQueue<T, N> {
+    fn drop(&mut self) {
+        // Notify read/write prohibition to prevent undefined behavior on dropping.
+        self.is_destroying.store(true, Ordering::Release);
     }
 }
 
