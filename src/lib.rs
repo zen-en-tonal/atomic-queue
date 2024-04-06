@@ -67,7 +67,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                 Ok(write) => {
                     // Wait for if the entry is already locked to read.
                     while self.flags[write]
-                        .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                         .is_err()
                     {}
 
@@ -77,8 +77,11 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                         mem::MaybeUninit::new(entry),
                     );
 
-                    // release lock.
-                    self.flags[write].store(false, Ordering::Relaxed);
+                    // Release lock.
+                    // All above operations should be executed
+                    // before other thread acquire the lock.
+                    // Because the lock to write is unlocked by Ordering::Release.
+                    self.flags[write].store(false, Ordering::Release);
 
                     break true;
                 }
@@ -113,7 +116,7 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                 Ok(read) => {
                     // Wait for if the entry is already locked to write.
                     while self.flags[read]
-                        .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                         .is_err()
                     {}
 
@@ -125,8 +128,11 @@ impl<T, const N: usize> AtomicQueue<T, N> {
                     // Safety: the value must be meaningful by the above operation.
                     let value = unsafe { value.assume_init() };
 
-                    // release lock.
-                    self.flags[read].store(false, Ordering::Relaxed);
+                    // Release lock.
+                    // All above operations should be executed
+                    // before other thread acquire the lock.
+                    // Because the lock to read is unlocked by Ordering::Release.
+                    self.flags[read].store(false, Ordering::Release);
 
                     return Some(value);
                 }
